@@ -1,5 +1,8 @@
 import logging
 import time
+from typing import Dict, List, Any
+import pandas as pd
+import re
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -8,6 +11,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
+
 
 
 logging.basicConfig(
@@ -44,7 +48,13 @@ def setup_webdriver():
         raise
  
 
-def scrape_news(webdriver: webdriver):
+def scrape_news(webdriver) -> List[Dict[str, Any]]:
+    """scrape data from target url and return news to array
+    Args:
+        webdriver (webdriver): selenium web driver
+    Returns:
+        _type_: List of dicts
+    """
     logger.info("Starting web scraping process")
     url = "https://www.yogonet.com/international/"
     kicker_css_selector = 'div.volanta'
@@ -97,13 +107,38 @@ def scrape_news(webdriver: webdriver):
         logger.info(f"Web scraping completed. Collected {len(news_data)} articles.")
     return news_data
  
+ 
+def process_data(news_data: List[Dict[str, Any]]):
+    """
+    Process the scraped news data using pandas and add required metrics.
+    
+    returns: Pandas.df
+    """
+    logger.info("Processing data...")
+    df = pd.DataFrame(news_data)
+    logger.info(f"DataFrame columns: {df.columns.tolist()}")
+    
+    # added required metrics
+    df['title_word_count'] = df['title'].apply(lambda x: len(str(x).split()))
+    df['title_char_count'] = df['title'].apply(lambda x: len(str(x)))    
+    df['capitalized_words'] = df['title'].apply(get_capitalized_words)  
+    logger.info("Data processing completed.")
+    return df
+
+
+def get_capitalized_words(text: str):
+    """find capitalized word in a string"""
+    words = str(text).split()
+    capitalized = [word for word in words if re.match(r'^[A-Z]', word)]
+    return ', '.join(capitalized)
+
 
 def main():
     logger.info("Starting the data pipeline...") 
     try:
         driver = setup_webdriver()
         news_data = scrape_news(webdriver=driver)
-        
+        processed_data = process_data(news_data)
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         raise
