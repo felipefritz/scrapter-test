@@ -1,8 +1,10 @@
 import logging
+import os
+import re
 import time
 from typing import Dict, List, Any
+
 import pandas as pd
-import re
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -12,7 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
-
+from google.cloud import bigquery
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,12 +135,92 @@ def get_capitalized_words(text: str):
     return ', '.join(capitalized)
 
 
+def upload_to_bigquery(df: pd.DataFrame) -> None:
+    logger.info("Preparing to upload data to BigQuery...")
+    
+    try:
+        client = bigquery.Client()
+        project_id = os.environ.get('GCP_PROJECT', GCP_PROJECT_ID)     
+        table_id = f"{project_id}.{BIG_QUERY_DATASET_NAME}.{BIG_QUERY_TABLE_NAME}"
+        logger.info(f"Target BigQuery table: {table_id}")
+        
+        # check if dataset exists
+        dataset_ref = f"{project_id}.{BIG_QUERY_DATASET_NAME}"
+        datasets = list(client.list_datasets())
+        dataset_ids = [dataset.dataset_id for dataset in datasets]
+        
+        if BIG_QUERY_DATASET_NAME in dataset_ids:
+            logger.info(f"Dataset {BIG_QUERY_DATASET_NAME} exists")
+        else:
+            logger.info(f"Dataset {BIG_QUERY_DATASET_NAME} not found, creating it")
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = "us-central1"
+            client.create_dataset(dataset)
+            logger.info(f"Dataset {BIG_QUERY_DATASET_NAME} created")
+        
+        # check if table exists and has data
+        try:
+            table = client.get_table(table_id)
+            if table.num_rows > 0:
+                # check for duplicate entries by comparing with new data
+                query = f"SELECT link FROM `{table_id}`"
+                existing_links = [row.link for row in client.query(query).result()]
+                logger.info(f"Found {len(existing_links)} existing articles in the table")
+                
+                # filter out duplicate articles
+                new_links = df['link'].tolist()
+                duplicate_links = set(existing_links).intersection(set(new_links))
+                if duplicate_links:
+                    logger.info(f"Found {len(duplicate_links)} duplicate articles, filtering them out")
+                    df = df[~df['link'].isin(duplicate_links)]
+                
+                if df.empty:
+                    logger.info("No new articles to upload, skipping")
+                    return
+                else:
+                    logger.info(f"Uploading {len(df)} new articles")
+                    write_disposition = "WRITE_APPEND"
+            else:
+                logger.info("Table exists but is empty")
+                write_disposition = "WRITE_TRUNCATE"
+        except Exception as e:
+            logger.info(f"Table does not exist or cannot be accessed: {e}")
+            write_disposition = "WRITE_TRUNCATE"
+        
+        # set up table  schema in bigquery
+        job_config = bigquery.LoadJobConfig(
+            schema=[
+                bigquery.SchemaField("title", "STRING"),
+                bigquery.SchemaField("kicker", "STRING"),
+                bigquery.SchemaField("image_url", "STRING"),
+                bigquery.SchemaField("link", "STRING"),
+                bigquery.SchemaField("title_word_count", "INTEGER"),
+                bigquery.SchemaField("title_char_count", "INTEGER"),
+                bigquery.SchemaField("capitalized_words", "STRING"),
+            ],
+            write_disposition=write_disposition,
+        )
+        
+        # start job
+        logger.info(f"Starting BigQuery load job with {len(df)} rows using {write_disposition}")
+        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
+        job.result()
+        
+        table = client.get_table(table_id)
+        logger.info(f"Table now has {table.num_rows} rows")
+            
+    except Exception as e:
+        logger.error(f"Error uploading to BigQuery: {e}")
+ 
+
 def main():
     logger.info("Starting the data pipeline...") 
     try:
         driver = setup_webdriver()
         news_data = scrape_news(webdriver=driver)
         processed_data = process_data(news_data)
+        upload_to_bigquery(processed_data)
+        logger.info("Pipeline completed successfully")
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         raise
