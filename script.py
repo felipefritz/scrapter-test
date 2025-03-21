@@ -2,8 +2,10 @@ import logging
 import os
 import re
 import time
-from typing import Dict, List, Any
+from collections import defaultdict
 
+from typing import Dict, List, Any
+import spacy
 import pandas as pd
 
 from selenium import webdriver
@@ -25,6 +27,27 @@ GCP_PROJECT_ID = "scraping-challenge-123"
 BIG_QUERY_DATASET_NAME = "news_data"
 BIG_QUERY_TABLE_NAME = "yogonet_news"
 
+# se utiliza  spacy para detectar y extraer entidades conocidas requeridas para el punto 6.1
+nlp = spacy.load("en_core_web_sm")
+
+def extract_named_entities(text):
+    entities = defaultdict(set)
+    
+    doc = nlp(text)
+    
+    for ent in doc.ents:
+        if ent.label_ == "PERSON":
+            entities["persons"].add(ent.text)
+        elif ent.label_ == "ORG":
+            entities["organizations"].add(ent.text)
+        elif ent.label_ == "GPE" or ent.label_ == "LOC":
+            entities["locations"].add(ent.text)
+    
+    return {
+        "persons": ", ".join(entities["persons"]),
+        "organizations": ", ".join(entities["organizations"]),
+        "locations": ", ".join(entities["locations"])
+    }
 
 def setup_webdriver():
     logger.info("Setting up Chrome WebDriver...")
@@ -124,6 +147,14 @@ def process_data(news_data: List[Dict[str, Any]]):
     df['title_word_count'] = df['title'].apply(lambda x: len(str(x).split()))
     df['title_char_count'] = df['title'].apply(lambda x: len(str(x)))    
     df['capitalized_words'] = df['title'].apply(get_capitalized_words)  
+    
+    # Parte 6 punto 1: extraer persons, organizations y locations
+    entity_results = df['title'].apply(extract_named_entities)
+    
+    df['persons'] = entity_results.apply(lambda x: x['persons'])
+    df['organizations'] = entity_results.apply(lambda x: x['organizations'])
+    df['locations'] = entity_results.apply(lambda x: x['locations'])
+    
     logger.info("Data processing completed.")
     return df
 

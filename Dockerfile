@@ -59,7 +59,8 @@ WORKDIR /app
 # install script dependencies
 COPY requirements.txt /app/
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
-
+RUN python -m pip install spacy>=3.5.0 && \
+    python -m spacy download en_core_web_sm
 COPY . /app/
 
 # add a script  entrypoint to start Xvfb
