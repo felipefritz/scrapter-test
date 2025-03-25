@@ -2,11 +2,15 @@ import logging
 import os
 import re
 import time
-from collections import defaultdict
-
-from typing import Dict, List, Any
+import json
 import spacy
 import pandas as pd
+from collections import defaultdict
+from typing import Dict, List, Any
+
+import openai
+from tenacity import retry, stop_after_attempt, wait_exponential
+from google.cloud import bigquery
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -16,7 +20,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
-from google.cloud import bigquery
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +75,53 @@ def setup_webdriver():
         logger.error(f"Failed to initialize Chrome WebDriver: {e}")
         raise
  
+
+class LLMScraper:
+    def __init__(self):
+        self.client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def identify_elements(self, html_content):        
+        prompt = f"""
+        You are an expert web scraper. Analyze this HTML snippet and identify the following elements:
+        1. Title: The main headline or title of the article
+        2. Kicker: The subtitle, category, or topic indicator
+        3. Link: The URL to the full article
+        4. Image URL: The source URL of the main article image
+
+        HTML snippet:
+        ```html
+        {html_content}
+        ```
+
+        Extract these elements and respond only in valid json format with these keys:
+        {{
+            "title": "string",
+            "kicker": "string",
+            "link": "string",
+            "image_url": "string"
+        }}
+        If an element is not found, use an empty string for its value.
+        """
+
+        response = self.client.chat.completions.create(
+            model="gpt-4-turbo", 
+            messages=[{"role": "system", "content": "You are a web scraping assistant"},
+                      {"role": "user", "content": prompt}],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        try:
+            result = json.loads(response.choices[0].message.content)
+            return result
+        except Exception as e:
+            print(f"Error parsing LLM response: {e}")
+            return {
+                "title": "",
+                "kicker": "",
+                "link": "",
+                "image_url": ""
+            }
 
 def scrape_news(webdriver) -> List[Dict[str, Any]]:
     """scrape data from target url and return news to array
@@ -130,6 +180,46 @@ def scrape_news(webdriver) -> List[Dict[str, Any]]:
     finally:
         webdriver.quit()
         logger.info(f"Web scraping completed. Collected {len(news_data)} articles.")
+    return news_data
+ 
+ 
+def scrape_news_ai():
+    logger.info("Starting web scraping process with LLM-assisted dynamic scraping")
+    driver = setup_webdriver()
+    url = "https://www.yogonet.com/international/"
+    news_data = []
+    llm_scraper = LLMScraper()
+
+    try:
+        driver.get(url)
+        logger.info("Waiting for page to load...")
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+        )
+        time.sleep(3)
+        article_containers = driver.find_elements(By.CSS_SELECTOR, "div.noticia, article, .article, [class*='article'], [class*='news']")
+        
+        if not article_containers:
+            logger.warning("No article containers found")
+            return news_data
+            
+        logger.info(f"Found {len(article_containers)}")
+        
+        for container in article_containers:
+            try:
+                html_content = container.get_attribute('outerHTML')
+                article_data = llm_scraper.identify_elements(html_content)
+                if article_data.get('title') and article_data.get('link'):
+                    news_data.append(article_data)
+                    logger.info(f"Added article: {article_data['title'][:30]}...")
+            except Exception as e:
+                logger.error(f"Error processing article: {e}")
+        
+    except Exception as e:
+        logger.error(f"Error during web scraping: {e}")
+    finally:
+        driver.quit()
+        logger.info(f"Web scraping success. Collected {len(news_data)} articles.")
     return news_data
  
  
@@ -244,11 +334,14 @@ def upload_to_bigquery(df: pd.DataFrame) -> None:
         logger.error(f"Error uploading to BigQuery: {e}")
  
 
-def main():
+def main(ai_scraper=False):
     logger.info("Starting the data pipeline...") 
     try:
         driver = setup_webdriver()
-        news_data = scrape_news(webdriver=driver)
+        if(ai_scraper):
+            news_data = scrape_news_ai(webdriver=driver)
+        else:
+            news_data = scrape_news(webdriver=driver)
         processed_data = process_data(news_data)
         upload_to_bigquery(processed_data)
         logger.info("Pipeline completed successfully")
